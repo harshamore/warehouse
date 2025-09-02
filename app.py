@@ -141,12 +141,21 @@ class ShiftAwareWarehouseAnalyzer:
             return 'Unknown'
     
     def add_shift_information(self, timestamp_column):
-        """Add shift information to the dataset"""
+        """Add shift information to the dataset based on task request time"""
         if timestamp_column in self.df.columns:
+            # Convert to datetime
             self.df['timestamp'] = pd.to_datetime(self.df[timestamp_column])
+            # Determine shift based on when task was requested
             self.df['shift'] = self.df['timestamp'].apply(self.determine_shift)
             return True
         return False
+    
+    def filter_data_by_shift(self, shift_name, timestamp_column):
+        """Filter dataset to show only tasks requested during specific shift"""
+        if 'shift' not in self.df.columns:
+            return pd.DataFrame()
+        
+        return self.df[self.df['shift'] == shift_name].copy()
     
     def analyze_operators_per_shift(self):
         """Analyze operators across different shifts"""
@@ -450,29 +459,51 @@ def main():
             st.sidebar.header("🕐 Shift Analysis Setup")
             
             if timestamp_cols:
+                st.sidebar.markdown("""
+                **📋 Timestamp Column Guide:**
+                - **Requested**: When task was scheduled ✅ **(Recommended for shift analysis)**
+                - **Confirmed**: When task was accepted by system
+                - **Completed**: When task was actually finished
+                - **Rotadate**: Product rotation/batch dates
+                """)
+                
                 selected_timestamp = st.sidebar.selectbox(
                     "Select Timestamp Column for Shift Analysis",
                     options=timestamp_cols,
-                    help="Choose the column that represents when tasks were performed"
+                    index=timestamp_cols.index('Requested') if 'Requested' in timestamp_cols else 0,
+                    help="Choose 'Requested' to analyze tasks by when they were assigned to shifts"
                 )
                 
+                st.sidebar.info(f"💡 Using **{selected_timestamp}** time means:\n\n"
+                               f"• Morning shift analysis = Tasks {selected_timestamp.lower()} 06:00-14:00\n"
+                               f"• Afternoon shift analysis = Tasks {selected_timestamp.lower()} 14:00-22:00\n" 
+                               f"• Night shift analysis = Tasks {selected_timestamp.lower()} 22:00-06:00")
+                
                 if st.sidebar.button("🔄 Process Shift Data", type="primary"):
-                    with st.spinner("Processing shift data..."):
+                    with st.spinner(f"Processing shift data using {selected_timestamp} timestamps..."):
                         success = analyzer.add_shift_information(selected_timestamp)
                         if success:
-                            st.sidebar.success("✅ Shift data processed successfully!")
+                            st.sidebar.success(f"✅ Shift data processed using {selected_timestamp} time!")
+                            
+                            # Show quick shift breakdown
+                            shift_counts = df_clean.groupby('shift').size()
+                            st.sidebar.markdown("**📊 Tasks by Shift:**")
+                            for shift, count in shift_counts.items():
+                                st.sidebar.markdown(f"• {shift}: {count} tasks")
                         else:
                             st.sidebar.error("❌ Failed to process shift data")
             else:
                 st.sidebar.warning("⚠️ No timestamp columns detected. Shift analysis not available.")
-                st.sidebar.info("Ensure your data contains columns with time/date information (e.g., 'Completed', 'Requested', etc.)")
+                st.sidebar.info("Ensure your data contains columns like 'Requested', 'Confirmed', or 'Completed'")
             
-            # Display shift definitions
+            # Display shift definitions  
             st.sidebar.header("📋 Shift Definitions")
             st.sidebar.markdown("""
-            **Morning Shift**: 06:00 - 14:00  
-            **Afternoon Shift**: 14:00 - 22:00  
-            **Night Shift**: 22:00 - 06:00
+            **☀️ Morning Shift**: 06:00 - 14:00  
+            **🌅 Afternoon Shift**: 14:00 - 22:00  
+            **🌙 Night Shift**: 22:00 - 06:00
+            
+            *Tasks are assigned to shifts based on their **request time**, not completion time.*
             """)
             
             # Analysis controls
@@ -532,6 +563,10 @@ def main():
                 st.header("🕐 Shift Analysis")
                 
                 if 'shift' in df_clean.columns:
+                    # Explain the analysis approach
+                    st.info(f"📊 **Analysis Approach**: Tasks are grouped by their **{selected_timestamp}** time, meaning we're analyzing "
+                           f"how operators perform on workload assigned to their shift, regardless of when tasks were actually completed.")
+                    
                     # Shift overview
                     shift_summary = analyzer.analyze_operators_per_shift()
                     shift_productivity = analyzer.calculate_shift_productivity_metrics()
@@ -826,8 +861,10 @@ def main():
             'Queue': ['FLRP', 'FLRP', 'VC1P', 'FL1P', 'VC1P'],
             'Task': ['RP', 'RP', 'SOCS', 'SOCS', 'SOCS'],
             'Quantity': [36, 42, 63, 45, 52],
-            'Completed': ['2024-01-15 08:30:00', '2024-01-15 09:15:00', '2024-01-15 16:45:00', 
-                         '2024-01-15 23:20:00', '2024-01-15 17:30:00']
+            'Requested': ['2024-01-15 08:30:00', '2024-01-15 09:15:00', '2024-01-15 16:45:00', 
+                         '2024-01-15 23:20:00', '2024-01-15 17:30:00'],
+            'Completed': ['2024-01-15 10:45:00', '2024-01-15 11:30:00', '2024-01-15 18:20:00',
+                         '2024-01-16 01:15:00', '2024-01-15 19:45:00']
         }
         sample_df = pd.DataFrame(sample_data)
         st.dataframe(sample_df)
@@ -836,17 +873,26 @@ def main():
         **Required columns:**
         - **User**: Operator ID or identifier
         - **Queue**: Queue name (FLRP, FL1P, VC1P, etc.)
-        - **Timestamp column**: Any column with date/time information (e.g., 'Completed', 'Requested', 'Confirmed')
+        - **Timestamp column**: Date/time information for shift analysis
+        
+        **📋 Timestamp Column Meanings:**
+        - **Requested**: When task was scheduled ✅ **(Best for shift analysis)**
+        - **Confirmed**: When task was accepted by system  
+        - **Completed**: When task was actually finished
+        - **Rotadate**: Product rotation/batch dates
         
         **Optional columns:**
-        - **Task**: Task type
+        - **Task**: Task type (RP, SOCS, SFCS, etc.)
         - **Quantity**: Task quantity
         - **From Zone**, **To Zone**: Location information
         
-        **Shift Definitions:**
-        - **Morning**: 06:00 - 14:00
-        - **Afternoon**: 14:00 - 22:00  
-        - **Night**: 22:00 - 06:00
+        **🕐 Shift Analysis Logic:**
+        Using **Requested** time ensures we analyze:
+        - **Morning workload**: Tasks requested 06:00-14:00 (handled by morning operators)
+        - **Afternoon workload**: Tasks requested 14:00-22:00 (handled by afternoon operators)  
+        - **Night workload**: Tasks requested 22:00-06:00 (handled by night operators)
+        
+        This gives you meaningful insights into shift productivity based on actual shift assignments!
         """)
 
 if __name__ == "__main__":
