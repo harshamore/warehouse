@@ -85,10 +85,57 @@ class ShiftOptimizer:
         # Return filtered data for selected shift
         return self.df[self.df['shift'] == selected_shift].copy()
     
+    def calculate_operator_active_hours(self, shift_data):
+        """Calculate active hours for each operator based on confirmed timestamps"""
+        operator_activity = {}
+        
+        for operator in shift_data['User'].unique():
+            operator_data = shift_data[shift_data['User'] == operator].copy()
+            
+            if len(operator_data) == 0:
+                continue
+            
+            # Get confirmed timestamps for this operator
+            confirmed_times = pd.to_datetime(operator_data['confirmed_time'])
+            confirmed_times = confirmed_times.sort_values()
+            
+            # Calculate active duration (first to last confirmed task)
+            if len(confirmed_times) > 1:
+                first_task = confirmed_times.min()
+                last_task = confirmed_times.max()
+                active_duration = last_task - first_task
+                active_hours = active_duration.total_seconds() / 3600
+            else:
+                # Single task - assume 15 minutes activity
+                active_hours = 0.25
+            
+            # Calculate productivity metrics
+            total_tasks = len(operator_data)
+            tasks_per_hour = total_tasks / max(active_hours, 0.1)  # Avoid division by zero
+            
+            # Queue distribution
+            queue_distribution = operator_data['Queue'].value_counts().to_dict()
+            primary_queue = operator_data['Queue'].mode().iloc[0] if len(operator_data) > 0 else None
+            
+            operator_activity[operator] = {
+                'total_tasks': total_tasks,
+                'active_hours': round(active_hours, 2),
+                'tasks_per_hour': round(tasks_per_hour, 2),
+                'first_task_time': confirmed_times.min(),
+                'last_task_time': confirmed_times.max(),
+                'queue_distribution': queue_distribution,
+                'primary_queue': primary_queue
+            }
+        
+        return operator_activity
+
     def calculate_queue_productivity(self, shift_data):
         """Calculate productivity metrics for each queue in the selected shift"""
         if shift_data.empty:
             return {}
+        
+        # First calculate operator active hours
+        operator_activity = self.calculate_operator_active_hours(shift_data)
         
         results = {}
         queues = shift_data['Queue'].unique()
@@ -96,8 +143,16 @@ class ShiftOptimizer:
         for queue in queues:
             queue_data = shift_data[shift_data['Queue'] == queue]
             
-            # Count tasks per operator
+            # Count tasks per operator and add active hours info
             operator_tasks = queue_data.groupby('User').size().reset_index(name='task_count')
+            
+            # Add active hours and productivity rate for each operator
+            operator_tasks['active_hours'] = operator_tasks['User'].map(
+                lambda x: operator_activity.get(x, {}).get('active_hours', 0)
+            )
+            operator_tasks['tasks_per_hour'] = operator_tasks['User'].map(
+                lambda x: operator_activity.get(x, {}).get('tasks_per_hour', 0)
+            )
             
             if len(operator_tasks) == 0:
                 continue
@@ -111,7 +166,9 @@ class ShiftOptimizer:
                 'mean': np.mean(task_counts),
                 'min': np.min(task_counts),
                 'max': np.max(task_counts),
-                'operator_details': operator_tasks.sort_values('task_count', ascending=False)
+                'operator_details': operator_tasks.sort_values('task_count', ascending=False),
+                'avg_active_hours': operator_tasks['active_hours'].mean(),
+                'avg_productivity_rate': operator_tasks['tasks_per_hour'].mean()
             }
             
             # Identify operators above/below median
@@ -137,7 +194,8 @@ class ShiftOptimizer:
             'shift_summary': {},
             'critical_issues': [],
             'opportunities': [],
-            'action_items': []
+            'action_items': [],
+            'efficiency_insights': []
         }
         
         total_operators = sum(analysis['total_operators'] for analysis in queue_analysis.values())
@@ -166,12 +224,49 @@ class ShiftOptimizer:
                     f"{queue}: Extreme performance variation ({analysis['performance_ratio']:.1f}:1 ratio)"
                 )
             
+            # Efficiency insights
+            if len(analysis['operator_details']) > 0:
+                avg_hours = analysis['avg_active_hours']
+                avg_productivity = analysis['avg_productivity_rate']
+                
+                # Check for efficiency issues
+                low_efficiency_ops = analysis['operator_details'][
+                    analysis['operator_details']['tasks_per_hour'] < avg_productivity * 0.7
+                ]
+                
+                if len(low_efficiency_ops) > 0:
+                    recommendations['efficiency_insights'].append(
+                        f"{queue}: {len(low_efficiency_ops)} operators working below 70% of average efficiency ({avg_productivity:.1f} tasks/hour)"
+                    )
+                
+                # Check for operators working long hours but low productivity
+                long_low_productivity = analysis['operator_details'][
+                    (analysis['operator_details']['active_hours'] > avg_hours * 1.2) & 
+                    (analysis['operator_details']['tasks_per_hour'] < avg_productivity * 0.8)
+                ]
+                
+                if len(long_low_productivity) > 0:
+                    recommendations['efficiency_insights'].append(
+                        f"{queue}: {len(long_low_productivity)} operators working long hours ({avg_hours*1.2:.1f}h+) but low productivity"
+                    )
+            
             # Opportunities
             if below_median_count > 0:
                 potential_gain = (analysis['median'] * below_median_count) - analysis['below_median']['task_count'].sum()
                 recommendations['opportunities'].append(
                     f"{queue}: Bring {below_median_count} operators to median → +{potential_gain:.0f} tasks/day (+{potential_gain/analysis['total_tasks']*100:.1f}%)"
                 )
+                
+                # Calculate efficiency improvement potential
+                below_median_hours = analysis['below_median']['active_hours'].sum()
+                current_below_productivity = analysis['below_median']['tasks_per_hour'].mean()
+                target_productivity = analysis['avg_productivity_rate']
+                efficiency_gain = (target_productivity - current_below_productivity) * below_median_hours
+                
+                if efficiency_gain > 0:
+                    recommendations['opportunities'].append(
+                        f"{queue}: Improve efficiency of {below_median_count} operators to average rate → +{efficiency_gain:.0f} tasks/day from better efficiency"
+                    )
             
             # Action items
             if below_median_count > 0:
@@ -181,10 +276,10 @@ class ShiftOptimizer:
                 )
             
             if len(analysis['above_median']) > 0:
-                top_performer = analysis['operator_details'].iloc[0]['User']
-                top_tasks = analysis['operator_details'].iloc[0]['task_count']
+                # Find the most efficient operator (highest tasks per hour)
+                most_efficient = analysis['operator_details'].loc[analysis['operator_details']['tasks_per_hour'].idxmax()]
                 recommendations['action_items'].append(
-                    f"{queue}: Study best practices from top performer {top_performer} ({top_tasks} tasks)"
+                    f"{queue}: Study efficiency practices from {most_efficient['User']} ({most_efficient['tasks_per_hour']:.1f} tasks/hour)"
                 )
         
         return recommendations
@@ -408,7 +503,7 @@ def main():
                 st.markdown('</div>', unsafe_allow_html=True)
                 
                 # Key Metrics
-                col1, col2, col3, col4 = st.columns(4)
+                col1, col2, col3, col4, col5 = st.columns(5)
                 with col1:
                     st.metric("Total Operators", recommendations['shift_summary']['total_operators'])
                 with col2:
@@ -417,7 +512,79 @@ def main():
                     avg_tasks = recommendations['shift_summary']['total_tasks'] / max(recommendations['shift_summary']['total_operators'], 1)
                     st.metric("Avg Tasks/Operator", f"{avg_tasks:.1f}")
                 with col4:
-                    st.metric("Queues Analyzed", len(queue_analysis))
+                    # Calculate average active hours across all operators in shift
+                    all_active_hours = []
+                    for analysis in queue_analysis.values():
+                        all_active_hours.extend(analysis['operator_details']['active_hours'].tolist())
+                    avg_active_hours = np.mean(all_active_hours) if all_active_hours else 0
+                    st.metric("Avg Active Hours", f"{avg_active_hours:.1f}h")
+                with col5:
+                    # Calculate average productivity rate
+                    all_productivity = []
+                    for analysis in queue_analysis.values():
+                        all_productivity.extend(analysis['operator_details']['tasks_per_hour'].tolist())
+                    avg_productivity = np.mean(all_productivity) if all_productivity else 0
+                    st.metric("Avg Tasks/Hour", f"{avg_productivity:.1f}")
+
+                # Operator Activity Analysis
+                st.header("👥 Operator Activity Analysis")
+                
+                # Collect all operator activity data
+                all_operator_data = []
+                for queue, analysis in queue_analysis.items():
+                    for _, row in analysis['operator_details'].iterrows():
+                        all_operator_data.append({
+                            'Operator': row['User'],
+                            'Queue': queue,
+                            'Total_Tasks': row['task_count'],
+                            'Active_Hours': row['active_hours'],
+                            'Tasks_Per_Hour': row['tasks_per_hour'],
+                            'Performance_vs_Median': 'Above' if row['task_count'] > analysis['median'] else 'Below'
+                        })
+                
+                if all_operator_data:
+                    activity_df = pd.DataFrame(all_operator_data)
+                    
+                    # Top performers by different metrics
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("**🏆 Top 10 by Tasks per Hour (Efficiency)**")
+                        top_efficiency = activity_df.nlargest(10, 'Tasks_Per_Hour')[
+                            ['Operator', 'Queue', 'Total_Tasks', 'Active_Hours', 'Tasks_Per_Hour']
+                        ]
+                        top_efficiency.columns = ['Operator', 'Queue', 'Total Tasks', 'Active Hours', 'Tasks/Hour']
+                        st.dataframe(top_efficiency, use_container_width=True)
+                    
+                    with col2:
+                        st.markdown("**⏱️ Top 10 by Total Tasks (Volume)**")
+                        top_volume = activity_df.nlargest(10, 'Total_Tasks')[
+                            ['Operator', 'Queue', 'Total_Tasks', 'Active_Hours', 'Tasks_Per_Hour']
+                        ]
+                        top_volume.columns = ['Operator', 'Queue', 'Total Tasks', 'Active Hours', 'Tasks/Hour']
+                        st.dataframe(top_volume, use_container_width=True)
+                    
+                    # Activity insights
+                    st.markdown("**📊 Activity Insights**")
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        max_active_hours = activity_df['Active_Hours'].max()
+                        longest_worker = activity_df[activity_df['Active_Hours'] == max_active_hours]['Operator'].iloc[0]
+                        st.metric("Longest Active", f"{longest_worker}", f"{max_active_hours:.1f}h")
+                    
+                    with col2:
+                        max_efficiency = activity_df['Tasks_Per_Hour'].max()
+                        most_efficient = activity_df[activity_df['Tasks_Per_Hour'] == max_efficiency]['Operator'].iloc[0]
+                        st.metric("Most Efficient", f"{most_efficient}", f"{max_efficiency:.1f} t/h")
+                    
+                    with col3:
+                        short_workers = len(activity_df[activity_df['Active_Hours'] < 2])
+                        st.metric("Short Sessions", short_workers, "operators < 2h")
+                    
+                    with col4:
+                        long_workers = len(activity_df[activity_df['Active_Hours'] > 6])
+                        st.metric("Long Sessions", long_workers, "operators > 6h")
                 
                 # Queue Analysis
                 st.header("📊 Queue Performance Analysis")
@@ -426,7 +593,7 @@ def main():
                     with st.expander(f"📈 {queue} Queue Analysis", expanded=True):
                         
                         # Queue metrics
-                        col1, col2, col3, col4, col5 = st.columns(5)
+                        col1, col2, col3, col4, col5, col6 = st.columns(6)
                         with col1:
                             st.metric("Operators", analysis['total_operators'])
                         with col2:
@@ -436,18 +603,26 @@ def main():
                         with col4:
                             st.metric("Range", f"{analysis['min']}-{analysis['max']}")
                         with col5:
-                            st.metric("Below Median", len(analysis['below_median']))
+                            st.metric("Avg Active Hours", f"{analysis['avg_active_hours']:.1f}h")
+                        with col6:
+                            st.metric("Avg Tasks/Hour", f"{analysis['avg_productivity_rate']:.1f}")
                         
-                        # Detailed operator analysis
+                        # Detailed operator analysis with active hours
                         col1, col2 = st.columns(2)
                         
                         with col1:
                             st.markdown("**🔻 Below Median Operators**")
                             if len(analysis['below_median']) > 0:
                                 below_df = analysis['below_median'].copy()
-                                below_df['Gap to Median'] = analysis['median'] - below_df['task_count']
-                                st.dataframe(below_df[['User', 'task_count', 'Gap to Median']], 
-                                           use_container_width=True)
+                                below_df['Gap_to_Median'] = analysis['median'] - below_df['task_count']
+                                display_below = below_df[['User', 'task_count', 'active_hours', 'tasks_per_hour', 'Gap_to_Median']]
+                                display_below.columns = ['Operator', 'Tasks', 'Active Hours', 'Tasks/Hour', 'Gap to Median']
+                                st.dataframe(display_below, use_container_width=True)
+                                
+                                # Analysis of below median operators
+                                avg_hours_below = below_df['active_hours'].mean()
+                                avg_productivity_below = below_df['tasks_per_hour'].mean()
+                                st.caption(f"📊 Below median group: {avg_hours_below:.1f}h avg active time, {avg_productivity_below:.1f} tasks/hour avg productivity")
                             else:
                                 st.success("✅ All operators at or above median!")
                         
@@ -455,11 +630,42 @@ def main():
                             st.markdown("**🔺 Above Median Operators**")
                             if len(analysis['above_median']) > 0:
                                 above_df = analysis['above_median'].copy()
-                                above_df['Above Median By'] = above_df['task_count'] - analysis['median']
-                                st.dataframe(above_df[['User', 'task_count', 'Above Median By']], 
-                                           use_container_width=True)
+                                above_df['Above_Median_By'] = above_df['task_count'] - analysis['median']
+                                display_above = above_df[['User', 'task_count', 'active_hours', 'tasks_per_hour', 'Above_Median_By']]
+                                display_above.columns = ['Operator', 'Tasks', 'Active Hours', 'Tasks/Hour', 'Above Median By']
+                                st.dataframe(display_above, use_container_width=True)
+                                
+                                # Analysis of above median operators
+                                avg_hours_above = above_df['active_hours'].mean()
+                                avg_productivity_above = above_df['tasks_per_hour'].mean()
+                                st.caption(f"📊 Above median group: {avg_hours_above:.1f}h avg active time, {avg_productivity_above:.1f} tasks/hour avg productivity")
                             else:
                                 st.info("No operators above median")
+                        
+                        # Efficiency insights for this queue
+                        if len(analysis['operator_details']) > 0:
+                            st.markdown("**🎯 Efficiency Insights**")
+                            
+                            # Find most and least efficient operators
+                            most_efficient = analysis['operator_details'].loc[analysis['operator_details']['tasks_per_hour'].idxmax()]
+                            least_efficient = analysis['operator_details'].loc[analysis['operator_details']['tasks_per_hour'].idxmin()]
+                            
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.markdown(f"**Most Efficient**: {most_efficient['User']}")
+                                st.markdown(f"• {most_efficient['tasks_per_hour']:.1f} tasks/hour")
+                                st.markdown(f"• {most_efficient['active_hours']:.1f} hours active")
+                            
+                            with col2:
+                                st.markdown(f"**Least Efficient**: {least_efficient['User']}")
+                                st.markdown(f"• {least_efficient['tasks_per_hour']:.1f} tasks/hour") 
+                                st.markdown(f"• {least_efficient['active_hours']:.1f} hours active")
+                            
+                            with col3:
+                                efficiency_gap = most_efficient['tasks_per_hour'] - least_efficient['tasks_per_hour']
+                                st.markdown(f"**Efficiency Gap**: {efficiency_gap:.1f} tasks/hour")
+                                potential_improvement = efficiency_gap * least_efficient['active_hours']
+                                st.markdown(f"**Improvement Potential**: +{potential_improvement:.0f} tasks if least efficient matched most efficient")
                 
                 # Optimization Recommendations
                 st.header("🎯 Optimization Recommendations")
@@ -468,6 +674,11 @@ def main():
                     st.markdown("### ⚠️ Critical Issues")
                     for issue in recommendations['critical_issues']:
                         st.markdown(f'<div class="danger-card">❌ {issue}</div>', unsafe_allow_html=True)
+                
+                if recommendations['efficiency_insights']:
+                    st.markdown("### ⏱️ Efficiency Insights")
+                    for insight in recommendations['efficiency_insights']:
+                        st.markdown(f'<div class="warning-card">⚡ {insight}</div>', unsafe_allow_html=True)
                 
                 if recommendations['opportunities']:
                     st.markdown("### 📈 Improvement Opportunities")
@@ -479,6 +690,16 @@ def main():
                     for i, action in enumerate(recommendations['action_items'], 1):
                         st.markdown(f"**{i}.** {action}")
                 
+                # Summary insights
+                st.markdown("### 💼 Key Takeaways for Shift Management")
+                st.markdown("""
+                **Focus Areas:**
+                - **Volume vs Efficiency**: Some operators work long hours but aren't productive - focus on efficiency training
+                - **Best Practice Replication**: Study high-efficiency operators and replicate their methods
+                - **Resource Allocation**: Consider redistributing work from low-efficiency to high-efficiency operators
+                - **Training Priorities**: Target operators with low tasks/hour rates for immediate improvement
+                """)
+                
                 # Visualizations
                 st.header("📊 Performance Dashboard")
                 viz_fig = optimizer.create_shift_visualizations(queue_analysis, selected_shift)
@@ -488,7 +709,7 @@ def main():
                 # Export Data
                 st.header("💾 Export Results")
                 
-                # Prepare export data
+                # Prepare export data with active hours
                 export_data = []
                 for queue, analysis in queue_analysis.items():
                     for _, row in analysis['operator_details'].iterrows():
@@ -497,23 +718,36 @@ def main():
                             'Queue': queue,
                             'Operator': row['User'],
                             'Tasks_Completed': row['task_count'],
-                            'Queue_Median': analysis['median'],
+                            'Active_Hours': row['active_hours'],
+                            'Tasks_Per_Hour': row['tasks_per_hour'],
+                            'Queue_Median_Tasks': analysis['median'],
+                            'Queue_Avg_Hours': analysis['avg_active_hours'],
+                            'Queue_Avg_Productivity': analysis['avg_productivity_rate'],
                             'Performance_Status': 'Above Median' if row['task_count'] > analysis['median'] else 
                                                 ('Below Median' if row['task_count'] < analysis['median'] else 'At Median'),
-                            'Gap_to_Median': analysis['median'] - row['task_count'],
-                            'Improvement_Potential': max(0, analysis['median'] - row['task_count'])
+                            'Task_Gap_to_Median': analysis['median'] - row['task_count'],
+                            'Productivity_vs_Queue_Avg': row['tasks_per_hour'] - analysis['avg_productivity_rate'],
+                            'Efficiency_Category': 'High Efficiency' if row['tasks_per_hour'] > analysis['avg_productivity_rate'] else 'Low Efficiency'
                         })
                 
                 if export_data:
                     export_df = pd.DataFrame(export_data)
                     csv = export_df.to_csv(index=False)
                     
-                    st.download_button(
-                        label=f"📥 Download {selected_shift} Shift Analysis (CSV)",
-                        data=csv,
-                        file_name=f"warehouse_{selected_shift.lower()}_shift_analysis.csv",
-                        mime="text/csv"
-                    )
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.download_button(
+                            label=f"📥 Download {selected_shift} Shift Analysis (CSV)",
+                            data=csv,
+                            file_name=f"warehouse_{selected_shift.lower()}_shift_analysis.csv",
+                            mime="text/csv"
+                        )
+                    
+                    with col2:
+                        # Show preview of export data
+                        st.markdown("**📊 Export Data Preview:**")
+                        preview_df = export_df[['Operator', 'Queue', 'Tasks_Completed', 'Active_Hours', 'Tasks_Per_Hour', 'Performance_Status']].head()
+                        st.dataframe(preview_df, use_container_width=True)
         
         except Exception as e:
             st.error(f"Error processing file: {str(e)}")
@@ -542,18 +776,31 @@ def main():
         - **Queue**: Queue name (FLRP, FL1P, VC1P, etc.)
         - **Confirmed**: Timestamp when task was confirmed (YYYY-MM-DD HH:MM:SS format)
         
-        **How Shift Analysis Works:**
-        - **☀️ Morning Shift**: Shows tasks confirmed 06:00-14:00
-        - **🌅 Afternoon Shift**: Shows tasks confirmed 14:00-22:00
-        - **🌙 Night Shift**: Shows tasks confirmed 22:00-06:00
+        **How Active Hours are Calculated:**
+        - **Active Duration**: Time from first confirmed task to last confirmed task per operator
+        - **Productivity Rate**: Total tasks ÷ Active hours = Tasks per hour
+        - **Example**: Operator confirms tasks from 08:30 to 12:45 = 4.25 active hours
+        
+        **Shift Analysis Logic:**
+        - **☀️ Morning Shift**: Tasks confirmed 06:00-14:00
+        - **🌅 Afternoon Shift**: Tasks confirmed 14:00-22:00
+        - **🌙 Night Shift**: Tasks confirmed 22:00-06:00
         
         **What You'll Get:**
-        1. **Queue-by-queue productivity analysis** for selected shift
-        2. **Operators above/below median performance** identification
-        3. **Specific optimization recommendations** and action items
-        4. **Interactive visualizations** and performance dashboards
-        5. **Exportable results** for implementation planning
+        1. **Task volume analysis** per operator in selected shift
+        2. **Active hours calculation** based on confirmed task timestamps  
+        3. **Productivity rates** (tasks per hour) for efficiency insights
+        4. **Above/below median identification** with efficiency analysis
+        5. **Optimization recommendations** focusing on efficiency vs volume
+        6. **Export data** with active hours and productivity metrics
+        
+        **Key Insights Provided:**
+        - **Volume Leaders**: Operators completing most tasks
+        - **Efficiency Leaders**: Operators with highest tasks/hour rates
+        - **Long Hours/Low Productivity**: Operators working long but inefficiently
+        - **Training Priorities**: Specific operators needing efficiency improvement
         """)
+
 
 if __name__ == "__main__":
     main()
