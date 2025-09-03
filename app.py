@@ -28,7 +28,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Title
-st.title("🏭 Warehouse Shift Optimizer v2")
+st.title("🏭 Warehouse Shift Productivity insights - Barath Ashok")
 st.markdown("**Select a shift to analyze operator productivity and optimize queue performance**")
 
 class ShiftOptimizer:
