@@ -5,12 +5,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import warnings
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 warnings.filterwarnings('ignore')
 
 # Page configuration
 st.set_page_config(
-    page_title="Warehouse Shift Optimizer v2",
+    page_title="Warehouse Shift Optimizer v3",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -24,20 +24,23 @@ st.markdown("""
     .shift-night { background: linear-gradient(90deg, #2F2F4F 0%, #483D8B 100%); color: white; padding: 15px; border-radius: 10px; border-left: 5px solid #9370DB; margin: 10px 0; }
     .optimization-card { background-color: #e8f5e8; padding: 15px; border-radius: 10px; border-left: 5px solid #28a745; margin: 10px 0; }
     .danger-card { background-color: #f8d7da; padding: 15px; border-radius: 10px; border-left: 5px solid #dc3545; margin: 10px 0; }
+    .warning-card { background-color: #fff3cd; padding: 15px; border-radius: 10px; border-left: 5px solid #ffc107; margin: 10px 0; }
+    .multi-queue-card { background-color: #e1f5fe; padding: 15px; border-radius: 10px; border-left: 5px solid #00acc1; margin: 10px 0; }
+    .utilization-card { background-color: #f3e5f5; padding: 15px; border-radius: 10px; border-left: 5px solid #9c27b0; margin: 10px 0; }
 </style>
 """, unsafe_allow_html=True)
 
 # Title
-st.title("🏭 Warehouse Shift Productivity insights - Barath Ashok")
-st.markdown("**Select a shift to analyze operator productivity and optimize queue performance**")
+st.title("🏭 Enhanced Warehouse Shift Optimizer - Multi-Queue & Utilization Analysis")
+st.markdown("**Advanced analytics for operator productivity, queue switching patterns, and shift utilization**")
 
-class ShiftOptimizer:
+class EnhancedShiftOptimizer:
     def __init__(self, df):
         self.df = df
         self.shift_definitions = {
-            'Morning': {'start': time(6, 0), 'end': time(14, 0), 'icon': '☀️', 'label': '06:00-14:00'},
-            'Afternoon': {'start': time(14, 0), 'end': time(22, 0), 'icon': '🌅', 'label': '14:00-22:00'}, 
-            'Night': {'start': time(22, 0), 'end': time(6, 0), 'icon': '🌙', 'label': '22:00-06:00'}
+            'Morning': {'start': time(6, 0), 'end': time(14, 0), 'icon': '☀️', 'label': '06:00-14:00', 'duration': 8},
+            'Afternoon': {'start': time(14, 0), 'end': time(22, 0), 'icon': '🌅', 'label': '14:00-22:00', 'duration': 8}, 
+            'Night': {'start': time(22, 0), 'end': time(6, 0), 'icon': '🌙', 'label': '22:00-06:00', 'duration': 8}
         }
         
     def clean_data(self):
@@ -84,6 +87,192 @@ class ShiftOptimizer:
         
         # Return filtered data for selected shift
         return self.df[self.df['shift'] == selected_shift].copy()
+    
+    def analyze_multi_queue_operators(self, shift_data):
+        """Analyze operators who work across different queues"""
+        if shift_data.empty:
+            return {}
+        
+        # Create operator-queue mapping
+        operator_queues = {}
+        operator_tasks_by_queue = {}
+        operator_time_by_queue = {}
+        
+        for operator in shift_data['User'].unique():
+            operator_data = shift_data[shift_data['User'] == operator].copy()
+            
+            # Get unique queues for this operator
+            queues = operator_data['Queue'].unique()
+            operator_queues[operator] = list(queues)
+            
+            # Tasks and time per queue
+            operator_tasks_by_queue[operator] = {}
+            operator_time_by_queue[operator] = {}
+            
+            for queue in queues:
+                queue_tasks = operator_data[operator_data['Queue'] == queue]
+                operator_tasks_by_queue[operator][queue] = len(queue_tasks)
+                
+                # Calculate time spent in each queue
+                if len(queue_tasks) > 1:
+                    queue_times = pd.to_datetime(queue_tasks['confirmed_time']).sort_values()
+                    time_span = queue_times.max() - queue_times.min()
+                    operator_time_by_queue[operator][queue] = time_span.total_seconds() / 3600
+                else:
+                    operator_time_by_queue[operator][queue] = 0.25  # 15 minutes for single task
+        
+        # Categorize operators
+        single_queue_ops = {op: queues for op, queues in operator_queues.items() if len(queues) == 1}
+        multi_queue_ops = {op: queues for op, queues in operator_queues.items() if len(queues) > 1}
+        
+        # Detailed analysis for multi-queue operators
+        multi_queue_analysis = {}
+        for operator, queues in multi_queue_ops.items():
+            total_tasks = sum(operator_tasks_by_queue[operator].values())
+            total_time = sum(operator_time_by_queue[operator].values())
+            
+            # Calculate queue switching frequency
+            operator_timeline = shift_data[shift_data['User'] == operator].copy()
+            operator_timeline = operator_timeline.sort_values('confirmed_time')
+            
+            switches = 0
+            prev_queue = None
+            for _, task in operator_timeline.iterrows():
+                if prev_queue and task['Queue'] != prev_queue:
+                    switches += 1
+                prev_queue = task['Queue']
+            
+            # Primary vs secondary queues
+            task_counts = operator_tasks_by_queue[operator]
+            primary_queue = max(task_counts.keys(), key=lambda q: task_counts[q])
+            primary_tasks = task_counts[primary_queue]
+            secondary_tasks = total_tasks - primary_tasks
+            
+            multi_queue_analysis[operator] = {
+                'queues': queues,
+                'queue_count': len(queues),
+                'total_tasks': total_tasks,
+                'total_time': total_time,
+                'tasks_per_queue': operator_tasks_by_queue[operator],
+                'time_per_queue': operator_time_by_queue[operator],
+                'queue_switches': switches,
+                'switches_per_hour': switches / max(total_time, 0.1),
+                'primary_queue': primary_queue,
+                'primary_tasks': primary_tasks,
+                'secondary_tasks': secondary_tasks,
+                'queue_flexibility_score': len(queues) * (switches / max(total_tasks, 1))
+            }
+        
+        return {
+            'single_queue': single_queue_ops,
+            'multi_queue': multi_queue_ops,
+            'multi_queue_analysis': multi_queue_analysis,
+            'summary': {
+                'total_operators': len(operator_queues),
+                'single_queue_count': len(single_queue_ops),
+                'multi_queue_count': len(multi_queue_ops),
+                'multi_queue_percentage': (len(multi_queue_ops) / len(operator_queues)) * 100
+            }
+        }
+    
+    def analyze_shift_utilization(self, shift_data, selected_shift):
+        """Analyze how operators are utilized throughout the shift"""
+        if shift_data.empty:
+            return {}
+        
+        shift_duration = self.shift_definitions[selected_shift]['duration']  # hours
+        utilization_analysis = {}
+        
+        for operator in shift_data['User'].unique():
+            operator_data = shift_data[shift_data['User'] == operator].copy()
+            operator_data = operator_data.sort_values('confirmed_time')
+            
+            if len(operator_data) == 0:
+                continue
+            
+            # Get timeline
+            confirmed_times = pd.to_datetime(operator_data['confirmed_time'])
+            first_task = confirmed_times.min()
+            last_task = confirmed_times.max()
+            
+            # Calculate working span
+            working_span = last_task - first_task
+            working_hours = working_span.total_seconds() / 3600
+            
+            # Calculate idle periods between tasks
+            idle_periods = []
+            if len(confirmed_times) > 1:
+                for i in range(1, len(confirmed_times)):
+                    time_gap = confirmed_times.iloc[i] - confirmed_times.iloc[i-1]
+                    gap_minutes = time_gap.total_seconds() / 60
+                    if gap_minutes > 15:  # Consider gaps > 15 minutes as idle time
+                        idle_periods.append(gap_minutes)
+            
+            total_idle_time = sum(idle_periods) / 60  # Convert to hours
+            active_time = working_hours - total_idle_time
+            
+            # Shift utilization metrics
+            shift_start_time = self.get_shift_start_datetime(first_task, selected_shift)
+            shift_end_time = shift_start_time + timedelta(hours=shift_duration)
+            
+            # Check if operator worked the full shift or partial
+            time_from_shift_start = (first_task - shift_start_time).total_seconds() / 3600
+            time_to_shift_end = (shift_end_time - last_task).total_seconds() / 3600
+            
+            # Calculate utilization percentages
+            working_span_utilization = (working_hours / shift_duration) * 100
+            active_time_utilization = (active_time / shift_duration) * 100
+            
+            # Task frequency analysis
+            total_tasks = len(operator_data)
+            tasks_per_active_hour = total_tasks / max(active_time, 0.1)
+            avg_time_between_tasks = (working_hours * 60) / max(total_tasks - 1, 1)  # minutes
+            
+            # Queue distribution over time
+            queue_timeline = []
+            for _, task in operator_data.iterrows():
+                task_time = pd.to_datetime(task['confirmed_time'])
+                hours_into_shift = (task_time - shift_start_time).total_seconds() / 3600
+                queue_timeline.append({
+                    'hours_into_shift': hours_into_shift,
+                    'queue': task['Queue'],
+                    'timestamp': task_time
+                })
+            
+            utilization_analysis[operator] = {
+                'total_tasks': total_tasks,
+                'working_hours': round(working_hours, 2),
+                'active_hours': round(active_time, 2),
+                'idle_hours': round(total_idle_time, 2),
+                'working_span_utilization': round(working_span_utilization, 1),
+                'active_time_utilization': round(active_time_utilization, 1),
+                'tasks_per_active_hour': round(tasks_per_active_hour, 2),
+                'avg_time_between_tasks': round(avg_time_between_tasks, 1),
+                'idle_periods_count': len(idle_periods),
+                'longest_idle_period': max(idle_periods) if idle_periods else 0,
+                'first_task_time': first_task,
+                'last_task_time': last_task,
+                'late_start_hours': max(0, time_from_shift_start),
+                'early_end_hours': max(0, time_to_shift_end),
+                'queue_timeline': queue_timeline
+            }
+        
+        return utilization_analysis
+    
+    def get_shift_start_datetime(self, reference_datetime, shift_name):
+        """Get the actual start time of the shift for a given reference datetime"""
+        shift_info = self.shift_definitions[shift_name]
+        date = reference_datetime.date()
+        
+        if shift_name == 'Night':
+            # Night shift starts on the previous day
+            if reference_datetime.time() < time(12, 0):  # If it's early morning, it's part of previous night's shift
+                date = date - timedelta(days=1)
+            shift_start = datetime.combine(date, shift_info['start'])
+        else:
+            shift_start = datetime.combine(date, shift_info['start'])
+        
+        return shift_start
     
     def calculate_operator_active_hours(self, shift_data):
         """Calculate active hours for each operator based on confirmed timestamps"""
@@ -188,27 +377,75 @@ class ShiftOptimizer:
         
         return results
     
-    def generate_optimization_recommendations(self, queue_analysis, selected_shift):
-        """Generate optimization recommendations for the selected shift"""
+    def generate_optimization_recommendations(self, queue_analysis, multi_queue_analysis, utilization_analysis, selected_shift):
+        """Generate comprehensive optimization recommendations"""
         recommendations = {
             'shift_summary': {},
             'critical_issues': [],
             'opportunities': [],
             'action_items': [],
-            'efficiency_insights': []
+            'efficiency_insights': [],
+            'multi_queue_insights': [],
+            'utilization_insights': []
         }
         
-        total_operators = sum(analysis['total_operators'] for analysis in queue_analysis.values())
-        total_tasks = sum(analysis['total_tasks'] for analysis in queue_analysis.values())
+        total_operators = sum(analysis['total_operators'] for analysis in queue_analysis.values()) if queue_analysis else 0
+        total_tasks = sum(analysis['total_tasks'] for analysis in queue_analysis.values()) if queue_analysis else 0
         
         recommendations['shift_summary'] = {
             'shift': selected_shift,
             'total_operators': total_operators,
             'total_tasks': total_tasks,
-            'queues_analyzed': len(queue_analysis)
+            'queues_analyzed': len(queue_analysis),
+            'multi_queue_operators': multi_queue_analysis['summary']['multi_queue_count'],
+            'multi_queue_percentage': multi_queue_analysis['summary']['multi_queue_percentage']
         }
         
-        # Analyze each queue for issues and opportunities
+        # Multi-queue insights
+        if multi_queue_analysis['multi_queue_analysis']:
+            # Find most flexible operators
+            flexible_ops = sorted(multi_queue_analysis['multi_queue_analysis'].items(), 
+                                key=lambda x: x[1]['queue_flexibility_score'], reverse=True)[:3]
+            
+            for op, analysis in flexible_ops:
+                recommendations['multi_queue_insights'].append(
+                    f"High flexibility: {op} works {analysis['queue_count']} queues with {analysis['queue_switches']} switches ({analysis['switches_per_hour']:.1f} switches/hour)"
+                )
+            
+            # Identify operators who could be better utilized across queues
+            single_queue_heavy = [op for op, analysis in multi_queue_analysis['multi_queue_analysis'].items() 
+                                if analysis['primary_tasks'] / analysis['total_tasks'] > 0.8]
+            
+            if single_queue_heavy:
+                recommendations['opportunities'].append(
+                    f"Cross-training opportunity: {len(single_queue_heavy)} multi-queue operators are 80%+ focused on single queue"
+                )
+        
+        # Utilization insights
+        if utilization_analysis:
+            low_utilization_ops = [op for op, analysis in utilization_analysis.items() 
+                                 if analysis['active_time_utilization'] < 50]
+            high_idle_ops = [op for op, analysis in utilization_analysis.items() 
+                           if analysis['idle_hours'] > 2]
+            
+            if low_utilization_ops:
+                recommendations['utilization_insights'].append(
+                    f"Low utilization: {len(low_utilization_ops)} operators with <50% active time utilization"
+                )
+                
+            if high_idle_ops:
+                recommendations['utilization_insights'].append(
+                    f"High idle time: {len(high_idle_ops)} operators with >2 hours idle time during shift"
+                )
+            
+            # Calculate average utilization
+            avg_utilization = np.mean([analysis['active_time_utilization'] for analysis in utilization_analysis.values()])
+            if avg_utilization < 60:
+                recommendations['critical_issues'].append(
+                    f"Shift utilization only {avg_utilization:.1f}% - significant idle time detected"
+                )
+        
+        # Existing queue analysis insights
         for queue, analysis in queue_analysis.items():
             below_median_count = len(analysis['below_median'])
             below_median_pct = (below_median_count / analysis['total_operators']) * 100
@@ -224,183 +461,153 @@ class ShiftOptimizer:
                     f"{queue}: Extreme performance variation ({analysis['performance_ratio']:.1f}:1 ratio)"
                 )
             
-            # Efficiency insights
-            if len(analysis['operator_details']) > 0:
-                avg_hours = analysis['avg_active_hours']
-                avg_productivity = analysis['avg_productivity_rate']
-                
-                # Check for efficiency issues
-                low_efficiency_ops = analysis['operator_details'][
-                    analysis['operator_details']['tasks_per_hour'] < avg_productivity * 0.7
-                ]
-                
-                if len(low_efficiency_ops) > 0:
-                    recommendations['efficiency_insights'].append(
-                        f"{queue}: {len(low_efficiency_ops)} operators working below 70% of average efficiency ({avg_productivity:.1f} tasks/hour)"
-                    )
-                
-                # Check for operators working long hours but low productivity
-                long_low_productivity = analysis['operator_details'][
-                    (analysis['operator_details']['active_hours'] > avg_hours * 1.2) & 
-                    (analysis['operator_details']['tasks_per_hour'] < avg_productivity * 0.8)
-                ]
-                
-                if len(long_low_productivity) > 0:
-                    recommendations['efficiency_insights'].append(
-                        f"{queue}: {len(long_low_productivity)} operators working long hours ({avg_hours*1.2:.1f}h+) but low productivity"
-                    )
-            
             # Opportunities
             if below_median_count > 0:
                 potential_gain = (analysis['median'] * below_median_count) - analysis['below_median']['task_count'].sum()
                 recommendations['opportunities'].append(
                     f"{queue}: Bring {below_median_count} operators to median → +{potential_gain:.0f} tasks/day (+{potential_gain/analysis['total_tasks']*100:.1f}%)"
                 )
-                
-                # Calculate efficiency improvement potential
-                below_median_hours = analysis['below_median']['active_hours'].sum()
-                current_below_productivity = analysis['below_median']['tasks_per_hour'].mean()
-                target_productivity = analysis['avg_productivity_rate']
-                efficiency_gain = (target_productivity - current_below_productivity) * below_median_hours
-                
-                if efficiency_gain > 0:
-                    recommendations['opportunities'].append(
-                        f"{queue}: Improve efficiency of {below_median_count} operators to average rate → +{efficiency_gain:.0f} tasks/day from better efficiency"
-                    )
-            
-            # Action items
-            if below_median_count > 0:
-                worst_performer = analysis['below_median'].iloc[0]['User'] if len(analysis['below_median']) > 0 else 'N/A'
-                recommendations['action_items'].append(
-                    f"{queue}: Priority training for operator {worst_performer} and {below_median_count-1} others"
-                )
-            
-            if len(analysis['above_median']) > 0:
-                # Find the most efficient operator (highest tasks per hour)
-                most_efficient = analysis['operator_details'].loc[analysis['operator_details']['tasks_per_hour'].idxmax()]
-                recommendations['action_items'].append(
-                    f"{queue}: Study efficiency practices from {most_efficient['User']} ({most_efficient['tasks_per_hour']:.1f} tasks/hour)"
-                )
         
         return recommendations
     
-    def create_shift_visualizations(self, queue_analysis, selected_shift):
-        """Create visualizations for the selected shift"""
-        if not queue_analysis:
+    def create_multi_queue_visualization(self, multi_queue_analysis):
+        """Create visualizations for multi-queue operator analysis"""
+        if not multi_queue_analysis['multi_queue_analysis']:
             return None
         
         fig = make_subplots(
             rows=2, cols=2,
             subplot_titles=(
-                f'{selected_shift} Shift - Task Distribution by Queue',
-                f'{selected_shift} Shift - Performance Distribution',
-                f'{selected_shift} Shift - Operator Performance',
-                f'{selected_shift} Shift - Queue Comparison'
+                'Queue Count Distribution',
+                'Queue Switching Frequency', 
+                'Primary vs Secondary Tasks',
+                'Flexibility Score Distribution'
             ),
-            specs=[
-                [{"type": "box"}, {"type": "bar"}],
-                [{"type": "scatter"}, {"type": "bar"}]
-            ]
+            specs=[[{"type": "bar"}, {"type": "scatter"}],
+                   [{"type": "bar"}, {"type": "histogram"}]]
         )
         
-        colors = {'Morning': '#FFD700', 'Afternoon': '#4169E1', 'Night': '#9370DB'}
-        color = colors.get(selected_shift, '#1f77b4')
-        
-        # 1. Box plot for task distribution
-        for queue, analysis in queue_analysis.items():
-            fig.add_trace(
-                go.Box(
-                    y=analysis['operator_details']['task_count'],
-                    name=queue,
-                    marker_color=color,
-                    boxpoints='all'
-                ),
-                row=1, col=1
-            )
-        
-        # 2. Performance distribution (above/below median)
-        performance_data = []
-        for queue, analysis in queue_analysis.items():
-            performance_data.append({
-                'Queue': queue,
-                'Above Median': len(analysis['above_median']),
-                'Below Median': len(analysis['below_median'])
+        # Prepare data
+        ops_data = []
+        for op, analysis in multi_queue_analysis['multi_queue_analysis'].items():
+            ops_data.append({
+                'operator': op,
+                'queue_count': analysis['queue_count'],
+                'switches_per_hour': analysis['switches_per_hour'],
+                'primary_tasks': analysis['primary_tasks'],
+                'secondary_tasks': analysis['secondary_tasks'],
+                'flexibility_score': analysis['queue_flexibility_score'],
+                'total_tasks': analysis['total_tasks']
             })
         
-        if performance_data:
-            perf_df = pd.DataFrame(performance_data)
-            fig.add_trace(
-                go.Bar(x=perf_df['Queue'], y=perf_df['Above Median'], 
-                      name='Above Median', marker_color='green'),
-                row=1, col=2
-            )
-            fig.add_trace(
-                go.Bar(x=perf_df['Queue'], y=perf_df['Below Median'], 
-                      name='Below Median', marker_color='red'),
-                row=1, col=2
-            )
+        ops_df = pd.DataFrame(ops_data)
         
-        # 3. Operator performance scatter
-        scatter_data = []
-        for queue, analysis in queue_analysis.items():
-            for _, row in analysis['operator_details'].iterrows():
-                scatter_data.append({
-                    'Queue': queue,
-                    'Operator': row['User'],
-                    'Tasks': row['task_count'],
-                    'vs_Median': 'Above' if row['task_count'] > analysis['median'] else 'Below'
-                })
-        
-        if scatter_data:
-            scatter_df = pd.DataFrame(scatter_data)
-            for performance in ['Above', 'Below']:
-                subset = scatter_df[scatter_df['vs_Median'] == performance]
-                fig.add_trace(
-                    go.Scatter(
-                        x=subset['Queue'], 
-                        y=subset['Tasks'],
-                        mode='markers',
-                        name=f'{performance} Median',
-                        marker=dict(
-                            size=8,
-                            color='green' if performance == 'Above' else 'red'
-                        ),
-                        text=subset['Operator'],
-                        textposition='top center'
-                    ),
-                    row=2, col=1
-                )
-        
-        # 4. Queue comparison metrics
-        queue_metrics = []
-        for queue, analysis in queue_analysis.items():
-            queue_metrics.append({
-                'Queue': queue,
-                'Median': analysis['median'],
-                'Operators': analysis['total_operators']
-            })
-        
-        if queue_metrics:
-            metrics_df = pd.DataFrame(queue_metrics)
-            fig.add_trace(
-                go.Bar(
-                    x=metrics_df['Queue'], 
-                    y=metrics_df['Median'],
-                    name='Median Tasks',
-                    marker_color=color,
-                    text=metrics_df['Operators'],
-                    texttemplate='%{text} ops',
-                    textposition='outside'
-                ),
-                row=2, col=2
-            )
-        
-        fig.update_layout(
-            height=800,
-            title_text=f"{selected_shift} Shift Analysis Dashboard",
-            showlegend=True
+        # 1. Queue count distribution
+        queue_count_dist = ops_df['queue_count'].value_counts().sort_index()
+        fig.add_trace(
+            go.Bar(x=queue_count_dist.index, y=queue_count_dist.values, 
+                  name='Queue Count', marker_color='lightblue'),
+            row=1, col=1
         )
         
+        # 2. Queue switching frequency
+        fig.add_trace(
+            go.Scatter(x=ops_df['total_tasks'], y=ops_df['switches_per_hour'],
+                      mode='markers', name='Switches/Hour',
+                      text=ops_df['operator'], textposition='top center',
+                      marker=dict(size=10, color='orange')),
+            row=1, col=2
+        )
+        
+        # 3. Primary vs Secondary tasks
+        fig.add_trace(
+            go.Bar(x=ops_df['operator'][:10], y=ops_df['primary_tasks'][:10], 
+                  name='Primary Queue', marker_color='green'),
+            row=2, col=1
+        )
+        fig.add_trace(
+            go.Bar(x=ops_df['operator'][:10], y=ops_df['secondary_tasks'][:10], 
+                  name='Secondary Queues', marker_color='lightgreen'),
+            row=2, col=1
+        )
+        
+        # 4. Flexibility score distribution
+        fig.add_trace(
+            go.Histogram(x=ops_df['flexibility_score'], name='Flexibility Score',
+                        marker_color='purple', nbinsx=10),
+            row=2, col=2
+        )
+        
+        fig.update_layout(height=800, title_text="Multi-Queue Operator Analysis", showlegend=True)
+        return fig
+    
+    def create_utilization_visualization(self, utilization_analysis, selected_shift):
+        """Create visualizations for shift utilization analysis"""
+        if not utilization_analysis:
+            return None
+        
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                'Active Time Utilization Distribution',
+                'Idle Time vs Working Hours',
+                'Task Rate vs Utilization',
+                'Shift Coverage Timeline'
+            ),
+            specs=[[{"type": "histogram"}, {"type": "scatter"}],
+                   [{"type": "scatter"}, {"type": "scatter"}]]
+        )
+        
+        # Prepare data
+        util_data = []
+        for op, analysis in utilization_analysis.items():
+            util_data.append({
+                'operator': op,
+                'active_time_utilization': analysis['active_time_utilization'],
+                'idle_hours': analysis['idle_hours'],
+                'working_hours': analysis['working_hours'],
+                'tasks_per_active_hour': analysis['tasks_per_active_hour'],
+                'late_start_hours': analysis['late_start_hours'],
+                'early_end_hours': analysis['early_end_hours']
+            })
+        
+        util_df = pd.DataFrame(util_data)
+        
+        # 1. Utilization distribution
+        fig.add_trace(
+            go.Histogram(x=util_df['active_time_utilization'], 
+                        name='Utilization %', marker_color='skyblue', nbinsx=15),
+            row=1, col=1
+        )
+        
+        # 2. Idle vs Working hours
+        fig.add_trace(
+            go.Scatter(x=util_df['working_hours'], y=util_df['idle_hours'],
+                      mode='markers', name='Idle vs Working',
+                      text=util_df['operator'], textposition='top center',
+                      marker=dict(size=10, color='red')),
+            row=1, col=2
+        )
+        
+        # 3. Task rate vs utilization
+        fig.add_trace(
+            go.Scatter(x=util_df['active_time_utilization'], y=util_df['tasks_per_active_hour'],
+                      mode='markers', name='Rate vs Utilization',
+                      text=util_df['operator'], textposition='top center',
+                      marker=dict(size=10, color='green')),
+            row=2, col=1
+        )
+        
+        # 4. Shift coverage (late start vs early end)
+        fig.add_trace(
+            go.Scatter(x=util_df['late_start_hours'], y=util_df['early_end_hours'],
+                      mode='markers', name='Shift Coverage',
+                      text=util_df['operator'], textposition='top center',
+                      marker=dict(size=10, color='purple')),
+            row=2, col=2
+        )
+        
+        fig.update_layout(height=800, title_text=f"{selected_shift} Shift Utilization Analysis", showlegend=True)
         return fig
 
 def main():
@@ -417,7 +624,7 @@ def main():
             # Load and process data
             with st.spinner("Loading data..."):
                 df = pd.read_excel(uploaded_file)
-                optimizer = ShiftOptimizer(df)
+                optimizer = EnhancedShiftOptimizer(df)
                 df_clean = optimizer.clean_data()
             
             st.success(f"✅ Data loaded: {len(df_clean)} records")
@@ -482,15 +689,19 @@ def main():
                         st.warning("⚠️ No data matches your filters.")
                         return
                     
-                    # Calculate metrics
+                    # Calculate all metrics
                     queue_analysis = optimizer.calculate_queue_productivity(shift_data)
+                    multi_queue_analysis = optimizer.analyze_multi_queue_operators(shift_data)
+                    utilization_analysis = optimizer.analyze_shift_utilization(shift_data, selected_shift)
                     
                     if not queue_analysis:
                         st.warning("⚠️ No queue analysis possible with current filters.")
                         return
                     
                     # Generate recommendations
-                    recommendations = optimizer.generate_optimization_recommendations(queue_analysis, selected_shift)
+                    recommendations = optimizer.generate_optimization_recommendations(
+                        queue_analysis, multi_queue_analysis, utilization_analysis, selected_shift
+                    )
                 
                 # Display Results
                 shift_class = f"shift-{selected_shift.lower()}"
@@ -502,97 +713,174 @@ def main():
                 st.markdown(f"**Analysis Period**: Tasks confirmed between {shift_label}")
                 st.markdown('</div>', unsafe_allow_html=True)
                 
-                # Key Metrics
-                col1, col2, col3, col4, col5 = st.columns(5)
+                # Enhanced Key Metrics
+                col1, col2, col3, col4, col5, col6 = st.columns(6)
+                
                 with col1:
                     st.metric("Total Operators", recommendations['shift_summary']['total_operators'])
                 with col2:
-                    st.metric("Total Tasks", recommendations['shift_summary']['total_tasks'])
+                    st.metric("Multi-Queue Operators", 
+                             recommendations['shift_summary']['multi_queue_operators'],
+                             f"{recommendations['shift_summary']['multi_queue_percentage']:.1f}%")
                 with col3:
+                    st.metric("Total Tasks", recommendations['shift_summary']['total_tasks'])
+                with col4:
                     avg_tasks = recommendations['shift_summary']['total_tasks'] / max(recommendations['shift_summary']['total_operators'], 1)
                     st.metric("Avg Tasks/Operator", f"{avg_tasks:.1f}")
-                with col4:
-                    # Calculate average active hours across all operators in shift
-                    all_active_hours = []
-                    for analysis in queue_analysis.values():
-                        all_active_hours.extend(analysis['operator_details']['active_hours'].tolist())
-                    avg_active_hours = np.mean(all_active_hours) if all_active_hours else 0
-                    st.metric("Avg Active Hours", f"{avg_active_hours:.1f}h")
                 with col5:
-                    # Calculate average productivity rate
-                    all_productivity = []
-                    for analysis in queue_analysis.values():
-                        all_productivity.extend(analysis['operator_details']['tasks_per_hour'].tolist())
-                    avg_productivity = np.mean(all_productivity) if all_productivity else 0
-                    st.metric("Avg Tasks/Hour", f"{avg_productivity:.1f}")
+                    # Calculate average utilization
+                    if utilization_analysis:
+                        avg_utilization = np.mean([analysis['active_time_utilization'] for analysis in utilization_analysis.values()])
+                        st.metric("Avg Utilization", f"{avg_utilization:.1f}%")
+                    else:
+                        st.metric("Avg Utilization", "N/A")
+                with col6:
+                    # Calculate average idle time
+                    if utilization_analysis:
+                        avg_idle = np.mean([analysis['idle_hours'] for analysis in utilization_analysis.values()])
+                        st.metric("Avg Idle Time", f"{avg_idle:.1f}h")
+                    else:
+                        st.metric("Avg Idle Time", "N/A")
 
-                # Operator Activity Analysis
-                st.header("👥 Operator Activity Analysis")
+                # NEW: Multi-Queue Operator Analysis
+                st.header("🔄 Multi-Queue Operator Analysis")
                 
-                # Collect all operator activity data
-                all_operator_data = []
-                for queue, analysis in queue_analysis.items():
-                    for _, row in analysis['operator_details'].iterrows():
-                        all_operator_data.append({
-                            'Operator': row['User'],
-                            'Queue': queue,
-                            'Total_Tasks': row['task_count'],
-                            'Active_Hours': row['active_hours'],
-                            'Tasks_Per_Hour': row['tasks_per_hour'],
-                            'Performance_vs_Median': 'Above' if row['task_count'] > analysis['median'] else 'Below'
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown('<div class="multi-queue-card">', unsafe_allow_html=True)
+                    st.markdown("### Queue Assignment Distribution")
+                    st.metric("Single-Queue Operators", multi_queue_analysis['summary']['single_queue_count'])
+                    st.metric("Multi-Queue Operators", multi_queue_analysis['summary']['multi_queue_count'])
+                    st.metric("Multi-Queue Percentage", f"{multi_queue_analysis['summary']['multi_queue_percentage']:.1f}%")
+                    st.markdown('</div>', unsafe_allow_html=True)
+                
+                with col2:
+                    if multi_queue_analysis['multi_queue_analysis']:
+                        st.markdown("### Top 5 Most Flexible Operators")
+                        flexible_ops = sorted(multi_queue_analysis['multi_queue_analysis'].items(), 
+                                            key=lambda x: x[1]['queue_flexibility_score'], reverse=True)[:5]
+                        
+                        flexibility_data = []
+                        for op, analysis in flexible_ops:
+                            flexibility_data.append({
+                                'Operator': op,
+                                'Queues': analysis['queue_count'], 
+                                'Switches': analysis['queue_switches'],
+                                'Tasks': analysis['total_tasks'],
+                                'Flex Score': f"{analysis['queue_flexibility_score']:.2f}"
+                            })
+                        
+                        if flexibility_data:
+                            flex_df = pd.DataFrame(flexibility_data)
+                            st.dataframe(flex_df, use_container_width=True)
+                
+                # Detailed Multi-Queue Analysis
+                if multi_queue_analysis['multi_queue_analysis']:
+                    st.subheader("📊 Detailed Multi-Queue Operator Analysis")
+                    
+                    # Create detailed table
+                    detailed_multi_queue = []
+                    for op, analysis in multi_queue_analysis['multi_queue_analysis'].items():
+                        queue_str = " + ".join([f"{q}({analysis['tasks_per_queue'][q]})" for q in analysis['queues']])
+                        detailed_multi_queue.append({
+                            'Operator': op,
+                            'Queues (Tasks)': queue_str,
+                            'Total Tasks': analysis['total_tasks'],
+                            'Queue Switches': analysis['queue_switches'],
+                            'Switches/Hour': f"{analysis['switches_per_hour']:.2f}",
+                            'Primary Queue': analysis['primary_queue'],
+                            'Primary %': f"{(analysis['primary_tasks']/analysis['total_tasks']*100):.1f}%",
+                            'Flexibility Score': f"{analysis['queue_flexibility_score']:.3f}"
                         })
+                    
+                    multi_queue_df = pd.DataFrame(detailed_multi_queue)
+                    st.dataframe(multi_queue_df, use_container_width=True)
+
+                # NEW: Shift Utilization Analysis
+                st.header("⏰ Shift Utilization Analysis")
                 
-                if all_operator_data:
-                    activity_df = pd.DataFrame(all_operator_data)
-                    
-                    # Top performers by different metrics
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.markdown("**🏆 Top 10 by Tasks per Hour (Efficiency)**")
-                        top_efficiency = activity_df.nlargest(10, 'Tasks_Per_Hour')[
-                            ['Operator', 'Queue', 'Total_Tasks', 'Active_Hours', 'Tasks_Per_Hour']
-                        ]
-                        top_efficiency.columns = ['Operator', 'Queue', 'Total Tasks', 'Active Hours', 'Tasks/Hour']
-                        st.dataframe(top_efficiency, use_container_width=True)
-                    
-                    with col2:
-                        st.markdown("**⏱️ Top 10 by Total Tasks (Volume)**")
-                        top_volume = activity_df.nlargest(10, 'Total_Tasks')[
-                            ['Operator', 'Queue', 'Total_Tasks', 'Active_Hours', 'Tasks_Per_Hour']
-                        ]
-                        top_volume.columns = ['Operator', 'Queue', 'Total Tasks', 'Active Hours', 'Tasks/Hour']
-                        st.dataframe(top_volume, use_container_width=True)
-                    
-                    # Activity insights
-                    st.markdown("**📊 Activity Insights**")
+                if utilization_analysis:
+                    # Utilization summary
                     col1, col2, col3, col4 = st.columns(4)
                     
+                    all_utilizations = [analysis['active_time_utilization'] for analysis in utilization_analysis.values()]
+                    all_idle_times = [analysis['idle_hours'] for analysis in utilization_analysis.values()]
+                    
                     with col1:
-                        max_active_hours = activity_df['Active_Hours'].max()
-                        longest_worker = activity_df[activity_df['Active_Hours'] == max_active_hours]['Operator'].iloc[0]
-                        st.metric("Longest Active", f"{longest_worker}", f"{max_active_hours:.1f}h")
+                        st.markdown('<div class="utilization-card">', unsafe_allow_html=True)
+                        avg_util = np.mean(all_utilizations)
+                        st.metric("Average Utilization", f"{avg_util:.1f}%")
+                        st.markdown('</div>', unsafe_allow_html=True)
                     
                     with col2:
-                        max_efficiency = activity_df['Tasks_Per_Hour'].max()
-                        most_efficient = activity_df[activity_df['Tasks_Per_Hour'] == max_efficiency]['Operator'].iloc[0]
-                        st.metric("Most Efficient", f"{most_efficient}", f"{max_efficiency:.1f} t/h")
+                        low_util_count = len([u for u in all_utilizations if u < 50])
+                        st.metric("Low Utilization (<50%)", low_util_count)
                     
                     with col3:
-                        short_workers = len(activity_df[activity_df['Active_Hours'] < 2])
-                        st.metric("Short Sessions", short_workers, "operators < 2h")
+                        high_idle_count = len([i for i in all_idle_times if i > 2])
+                        st.metric("High Idle Time (>2h)", high_idle_count)
                     
                     with col4:
-                        long_workers = len(activity_df[activity_df['Active_Hours'] > 6])
-                        st.metric("Long Sessions", long_workers, "operators > 6h")
+                        avg_idle = np.mean(all_idle_times)
+                        st.metric("Average Idle Time", f"{avg_idle:.1f}h")
+                    
+                    # Detailed utilization table
+                    st.subheader("👥 Individual Operator Utilization")
+                    
+                    util_table_data = []
+                    for op, analysis in utilization_analysis.items():
+                        util_table_data.append({
+                            'Operator': op,
+                            'Working Hours': f"{analysis['working_hours']:.2f}h",
+                            'Active Hours': f"{analysis['active_hours']:.2f}h", 
+                            'Idle Hours': f"{analysis['idle_hours']:.2f}h",
+                            'Utilization %': f"{analysis['active_time_utilization']:.1f}%",
+                            'Tasks/Active Hour': f"{analysis['tasks_per_active_hour']:.2f}",
+                            'Idle Periods': analysis['idle_periods_count'],
+                            'Late Start': f"{analysis['late_start_hours']:.1f}h",
+                            'Early End': f"{analysis['early_end_hours']:.1f}h"
+                        })
+                    
+                    util_df = pd.DataFrame(util_table_data)
+                    st.dataframe(util_df, use_container_width=True)
+                    
+                    # Utilization insights
+                    st.subheader("💡 Utilization Insights")
+                    
+                    # Low utilization operators
+                    low_util_ops = [op for op, analysis in utilization_analysis.items() 
+                                   if analysis['active_time_utilization'] < 60]
+                    
+                    if low_util_ops:
+                        st.markdown('<div class="warning-card">', unsafe_allow_html=True)
+                        st.markdown(f"**⚠️ {len(low_util_ops)} operators with <60% utilization:**")
+                        for op in low_util_ops[:5]:  # Show top 5
+                            util_pct = utilization_analysis[op]['active_time_utilization']
+                            idle_hrs = utilization_analysis[op]['idle_hours']
+                            st.markdown(f"• {op}: {util_pct:.1f}% utilization, {idle_hrs:.1f}h idle")
+                        st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    # High performers
+                    high_util_ops = [op for op, analysis in utilization_analysis.items() 
+                                   if analysis['active_time_utilization'] > 80]
+                    
+                    if high_util_ops:
+                        st.markdown('<div class="optimization-card">', unsafe_allow_html=True)
+                        st.markdown(f"**🏆 {len(high_util_ops)} high-utilization operators (>80%):**")
+                        for op in high_util_ops[:5]:  # Show top 5
+                            util_pct = utilization_analysis[op]['active_time_utilization']
+                            task_rate = utilization_analysis[op]['tasks_per_active_hour']
+                            st.markdown(f"• {op}: {util_pct:.1f}% utilization, {task_rate:.2f} tasks/hour")
+                        st.markdown('</div>', unsafe_allow_html=True)
                 
-                # Queue Analysis
+                # Original Queue Analysis (enhanced)
                 st.header("📊 Queue Performance Analysis")
                 
                 for queue, analysis in queue_analysis.items():
                     with st.expander(f"📈 {queue} Queue Analysis", expanded=True):
                         
-                        # Queue metrics
+                        # Enhanced queue metrics
                         col1, col2, col3, col4, col5, col6 = st.columns(6)
                         with col1:
                             st.metric("Operators", analysis['total_operators'])
@@ -607,7 +895,21 @@ def main():
                         with col6:
                             st.metric("Avg Tasks/Hour", f"{analysis['avg_productivity_rate']:.1f}")
                         
-                        # Detailed operator analysis with active hours
+                        # Multi-queue operators in this queue
+                        if multi_queue_analysis['multi_queue_analysis']:
+                            queue_multi_ops = [op for op, mq_analysis in multi_queue_analysis['multi_queue_analysis'].items() 
+                                             if queue in mq_analysis['queues']]
+                            
+                            if queue_multi_ops:
+                                st.markdown(f"**🔄 Multi-queue operators in {queue}:** {len(queue_multi_ops)} operators")
+                                multi_queue_info = []
+                                for op in queue_multi_ops[:5]:  # Show top 5
+                                    mq_data = multi_queue_analysis['multi_queue_analysis'][op]
+                                    other_queues = [q for q in mq_data['queues'] if q != queue]
+                                    multi_queue_info.append(f"{op} (also: {', '.join(other_queues)})")
+                                st.caption(" • ".join(multi_queue_info))
+                        
+                        # Rest of the existing queue analysis...
                         col1, col2 = st.columns(2)
                         
                         with col1:
@@ -618,11 +920,6 @@ def main():
                                 display_below = below_df[['User', 'task_count', 'active_hours', 'tasks_per_hour', 'Gap_to_Median']]
                                 display_below.columns = ['Operator', 'Tasks', 'Active Hours', 'Tasks/Hour', 'Gap to Median']
                                 st.dataframe(display_below, use_container_width=True)
-                                
-                                # Analysis of below median operators
-                                avg_hours_below = below_df['active_hours'].mean()
-                                avg_productivity_below = below_df['tasks_per_hour'].mean()
-                                st.caption(f"📊 Below median group: {avg_hours_below:.1f}h avg active time, {avg_productivity_below:.1f} tasks/hour avg productivity")
                             else:
                                 st.success("✅ All operators at or above median!")
                         
@@ -634,51 +931,26 @@ def main():
                                 display_above = above_df[['User', 'task_count', 'active_hours', 'tasks_per_hour', 'Above_Median_By']]
                                 display_above.columns = ['Operator', 'Tasks', 'Active Hours', 'Tasks/Hour', 'Above Median By']
                                 st.dataframe(display_above, use_container_width=True)
-                                
-                                # Analysis of above median operators
-                                avg_hours_above = above_df['active_hours'].mean()
-                                avg_productivity_above = above_df['tasks_per_hour'].mean()
-                                st.caption(f"📊 Above median group: {avg_hours_above:.1f}h avg active time, {avg_productivity_above:.1f} tasks/hour avg productivity")
                             else:
                                 st.info("No operators above median")
-                        
-                        # Efficiency insights for this queue
-                        if len(analysis['operator_details']) > 0:
-                            st.markdown("**🎯 Efficiency Insights**")
-                            
-                            # Find most and least efficient operators
-                            most_efficient = analysis['operator_details'].loc[analysis['operator_details']['tasks_per_hour'].idxmax()]
-                            least_efficient = analysis['operator_details'].loc[analysis['operator_details']['tasks_per_hour'].idxmin()]
-                            
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.markdown(f"**Most Efficient**: {most_efficient['User']}")
-                                st.markdown(f"• {most_efficient['tasks_per_hour']:.1f} tasks/hour")
-                                st.markdown(f"• {most_efficient['active_hours']:.1f} hours active")
-                            
-                            with col2:
-                                st.markdown(f"**Least Efficient**: {least_efficient['User']}")
-                                st.markdown(f"• {least_efficient['tasks_per_hour']:.1f} tasks/hour") 
-                                st.markdown(f"• {least_efficient['active_hours']:.1f} hours active")
-                            
-                            with col3:
-                                efficiency_gap = most_efficient['tasks_per_hour'] - least_efficient['tasks_per_hour']
-                                st.markdown(f"**Efficiency Gap**: {efficiency_gap:.1f} tasks/hour")
-                                potential_improvement = efficiency_gap * least_efficient['active_hours']
-                                st.markdown(f"**Improvement Potential**: +{potential_improvement:.0f} tasks if least efficient matched most efficient")
+
+                # Enhanced Optimization Recommendations
+                st.header("🎯 Enhanced Optimization Recommendations")
                 
-                # Optimization Recommendations
-                st.header("🎯 Optimization Recommendations")
+                if recommendations['multi_queue_insights']:
+                    st.markdown("### 🔄 Multi-Queue Insights")
+                    for insight in recommendations['multi_queue_insights']:
+                        st.markdown(f'<div class="multi-queue-card">🔄 {insight}</div>', unsafe_allow_html=True)
+                
+                if recommendations['utilization_insights']:
+                    st.markdown("### ⏰ Utilization Insights")
+                    for insight in recommendations['utilization_insights']:
+                        st.markdown(f'<div class="utilization-card">⏰ {insight}</div>', unsafe_allow_html=True)
                 
                 if recommendations['critical_issues']:
                     st.markdown("### ⚠️ Critical Issues")
                     for issue in recommendations['critical_issues']:
                         st.markdown(f'<div class="danger-card">❌ {issue}</div>', unsafe_allow_html=True)
-                
-                if recommendations['efficiency_insights']:
-                    st.markdown("### ⏱️ Efficiency Insights")
-                    for insight in recommendations['efficiency_insights']:
-                        st.markdown(f'<div class="warning-card">⚡ {insight}</div>', unsafe_allow_html=True)
                 
                 if recommendations['opportunities']:
                     st.markdown("### 📈 Improvement Opportunities")
@@ -690,63 +962,85 @@ def main():
                     for i, action in enumerate(recommendations['action_items'], 1):
                         st.markdown(f"**{i}.** {action}")
                 
-                # Summary insights
-                st.markdown("### 💼 Key Takeaways for Shift Management")
-                st.markdown("""
-                **Focus Areas:**
-                - **Volume vs Efficiency**: Some operators work long hours but aren't productive - focus on efficiency training
-                - **Best Practice Replication**: Study high-efficiency operators and replicate their methods
-                - **Resource Allocation**: Consider redistributing work from low-efficiency to high-efficiency operators
-                - **Training Priorities**: Target operators with low tasks/hour rates for immediate improvement
-                """)
+                # Enhanced Visualizations
+                st.header("📊 Advanced Analytics Dashboard")
                 
-                # Visualizations
-                st.header("📊 Performance Dashboard")
-                viz_fig = optimizer.create_shift_visualizations(queue_analysis, selected_shift)
-                if viz_fig:
-                    st.plotly_chart(viz_fig, use_container_width=True)
+                # Multi-queue visualization
+                if multi_queue_analysis['multi_queue_analysis']:
+                    st.subheader("🔄 Multi-Queue Operator Patterns")
+                    multi_queue_viz = optimizer.create_multi_queue_visualization(multi_queue_analysis)
+                    if multi_queue_viz:
+                        st.plotly_chart(multi_queue_viz, use_container_width=True)
                 
-                # Export Data
-                st.header("💾 Export Results")
+                # Utilization visualization
+                if utilization_analysis:
+                    st.subheader("⏰ Shift Utilization Dashboard")
+                    utilization_viz = optimizer.create_utilization_visualization(utilization_analysis, selected_shift)
+                    if utilization_viz:
+                        st.plotly_chart(utilization_viz, use_container_width=True)
                 
-                # Prepare export data with active hours
+                # Enhanced Export
+                st.header("💾 Enhanced Export Results")
+                
+                # Prepare comprehensive export data
                 export_data = []
-                for queue, analysis in queue_analysis.items():
-                    for _, row in analysis['operator_details'].iterrows():
-                        export_data.append({
-                            'Shift': selected_shift,
-                            'Queue': queue,
-                            'Operator': row['User'],
-                            'Tasks_Completed': row['task_count'],
-                            'Active_Hours': row['active_hours'],
-                            'Tasks_Per_Hour': row['tasks_per_hour'],
-                            'Queue_Median_Tasks': analysis['median'],
-                            'Queue_Avg_Hours': analysis['avg_active_hours'],
-                            'Queue_Avg_Productivity': analysis['avg_productivity_rate'],
-                            'Performance_Status': 'Above Median' if row['task_count'] > analysis['median'] else 
-                                                ('Below Median' if row['task_count'] < analysis['median'] else 'At Median'),
-                            'Task_Gap_to_Median': analysis['median'] - row['task_count'],
-                            'Productivity_vs_Queue_Avg': row['tasks_per_hour'] - analysis['avg_productivity_rate'],
-                            'Efficiency_Category': 'High Efficiency' if row['tasks_per_hour'] > analysis['avg_productivity_rate'] else 'Low Efficiency'
-                        })
+                for operator in shift_data['User'].unique():
+                    # Basic operator data
+                    operator_queues = shift_data[shift_data['User'] == operator]['Queue'].unique()
+                    operator_tasks = len(shift_data[shift_data['User'] == operator])
+                    
+                    # Multi-queue data
+                    is_multi_queue = len(operator_queues) > 1
+                    multi_queue_data = multi_queue_analysis['multi_queue_analysis'].get(operator, {})
+                    
+                    # Utilization data
+                    util_data = utilization_analysis.get(operator, {})
+                    
+                    # Queue performance data
+                    primary_queue = multi_queue_data.get('primary_queue') or operator_queues[0]
+                    queue_perf = queue_analysis.get(primary_queue, {})
+                    
+                    export_data.append({
+                        'Shift': selected_shift,
+                        'Operator': operator,
+                        'Total_Tasks': operator_tasks,
+                        'Primary_Queue': primary_queue,
+                        'All_Queues': ' + '.join(operator_queues),
+                        'Is_Multi_Queue': is_multi_queue,
+                        'Queue_Count': len(operator_queues),
+                        'Queue_Switches': multi_queue_data.get('queue_switches', 0),
+                        'Switches_Per_Hour': multi_queue_data.get('switches_per_hour', 0),
+                        'Flexibility_Score': multi_queue_data.get('queue_flexibility_score', 0),
+                        'Working_Hours': util_data.get('working_hours', 0),
+                        'Active_Hours': util_data.get('active_hours', 0), 
+                        'Idle_Hours': util_data.get('idle_hours', 0),
+                        'Active_Time_Utilization': util_data.get('active_time_utilization', 0),
+                        'Tasks_Per_Active_Hour': util_data.get('tasks_per_active_hour', 0),
+                        'Idle_Periods_Count': util_data.get('idle_periods_count', 0),
+                        'Late_Start_Hours': util_data.get('late_start_hours', 0),
+                        'Early_End_Hours': util_data.get('early_end_hours', 0),
+                        'Queue_Median_Tasks': queue_perf.get('median', 0),
+                        'Performance_vs_Median': 'Above' if operator_tasks > queue_perf.get('median', 0) else 'Below'
+                    })
                 
                 if export_data:
-                    export_df = pd.DataFrame(export_data)
-                    csv = export_df.to_csv(index=False)
+                    enhanced_export_df = pd.DataFrame(export_data)
+                    csv = enhanced_export_df.to_csv(index=False)
                     
                     col1, col2 = st.columns(2)
                     with col1:
                         st.download_button(
-                            label=f"📥 Download {selected_shift} Shift Analysis (CSV)",
+                            label=f"📥 Download Enhanced {selected_shift} Analysis (CSV)",
                             data=csv,
-                            file_name=f"warehouse_{selected_shift.lower()}_shift_analysis.csv",
+                            file_name=f"enhanced_warehouse_{selected_shift.lower()}_analysis.csv",
                             mime="text/csv"
                         )
                     
                     with col2:
-                        # Show preview of export data
-                        st.markdown("**📊 Export Data Preview:**")
-                        preview_df = export_df[['Operator', 'Queue', 'Tasks_Completed', 'Active_Hours', 'Tasks_Per_Hour', 'Performance_Status']].head()
+                        st.markdown("**📊 Enhanced Export Preview:**")
+                        preview_cols = ['Operator', 'Total_Tasks', 'Is_Multi_Queue', 'Queue_Count', 
+                                      'Active_Time_Utilization', 'Tasks_Per_Active_Hour']
+                        preview_df = enhanced_export_df[preview_cols].head()
                         st.dataframe(preview_df, use_container_width=True)
         
         except Exception as e:
@@ -754,10 +1048,30 @@ def main():
             st.info("Please ensure your Excel file contains 'User', 'Queue', and 'Confirmed' columns.")
     
     else:
-        # Welcome screen
-        st.info("👋 Welcome! Upload your warehouse operations Excel file to begin shift analysis.")
+        # Enhanced welcome screen
+        st.info("👋 Welcome to Enhanced Warehouse Shift Optimizer! Upload your operations data to analyze multi-queue patterns and shift utilization.")
         
-        # Required format
+        st.subheader("🆕 New Features Added")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("""
+            **🔄 Multi-Queue Analysis:**
+            - Identify operators working across multiple queues
+            - Track queue switching frequency and patterns
+            - Calculate flexibility scores for cross-training insights
+            - Analyze primary vs secondary queue focus
+            """)
+        
+        with col2:
+            st.markdown("""
+            **⏰ Shift Utilization Analysis:**
+            - Calculate actual working hours vs shift duration  
+            - Identify idle time periods between tasks
+            - Track late starts and early departures
+            - Measure active time utilization percentage
+            """)
+        
         st.subheader("📋 Required Data Format")
         sample_data = {
             'User': ['54001', '54002', '54003', '54004', '54005'],
@@ -771,34 +1085,25 @@ def main():
         st.dataframe(sample_df, use_container_width=True)
         
         st.markdown("""
-        **Required Columns:**
-        - **User**: Operator ID or identifier
-        - **Queue**: Queue name (FLRP, FL1P, VC1P, etc.)
-        - **Confirmed**: Timestamp when task was confirmed (YYYY-MM-DD HH:MM:SS format)
+        **Enhanced Analytics You'll Get:**
         
-        **How Active Hours are Calculated:**
-        - **Active Duration**: Time from first confirmed task to last confirmed task per operator
-        - **Productivity Rate**: Total tasks ÷ Active hours = Tasks per hour
-        - **Example**: Operator confirms tasks from 08:30 to 12:45 = 4.25 active hours
+        **🔄 Multi-Queue Insights:**
+        - **Queue Switching Patterns**: How often operators switch between queues
+        - **Flexibility Scoring**: Operators who can handle multiple queue types effectively
+        - **Cross-Training Opportunities**: Identify who could be trained on additional queues
+        - **Primary vs Secondary Focus**: Understanding workload distribution across queues
         
-        **Shift Analysis Logic:**
-        - **☀️ Morning Shift**: Tasks confirmed 06:00-14:00
-        - **🌅 Afternoon Shift**: Tasks confirmed 14:00-22:00
-        - **🌙 Night Shift**: Tasks confirmed 22:00-06:00
+        **⏰ Utilization Insights:**
+        - **Active vs Idle Time**: Actual working time vs gaps between tasks
+        - **Shift Coverage**: Late starts, early departures, and coverage gaps  
+        - **Efficiency Patterns**: Task completion rate during active periods
+        - **Resource Optimization**: Identify underutilized or overworked operators
         
-        **What You'll Get:**
-        1. **Task volume analysis** per operator in selected shift
-        2. **Active hours calculation** based on confirmed task timestamps  
-        3. **Productivity rates** (tasks per hour) for efficiency insights
-        4. **Above/below median identification** with efficiency analysis
-        5. **Optimization recommendations** focusing on efficiency vs volume
-        6. **Export data** with active hours and productivity metrics
-        
-        **Key Insights Provided:**
-        - **Volume Leaders**: Operators completing most tasks
-        - **Efficiency Leaders**: Operators with highest tasks/hour rates
-        - **Long Hours/Low Productivity**: Operators working long but inefficiently
-        - **Training Priorities**: Specific operators needing efficiency improvement
+        **📊 Advanced Visualizations:**
+        - Multi-queue operator switching patterns
+        - Utilization distribution across the shift
+        - Idle time vs productivity correlations
+        - Shift coverage timeline analysis
         """)
 
 
